@@ -1,9 +1,11 @@
 import dotenv from "dotenv";
 import express from "express";
+import bodyParser  from "body-parser";
 import { neon } from "@neondatabase/serverless";
 import bcrypt from "bcrypt";
 import jwt from "jsonwebtoken";
 import { sendEmail } from "./emails/sendEmail.js";
+import cors from 'cors';
 
 dotenv.config();
 
@@ -11,7 +13,13 @@ const app = express();
 const PORT = process.env.PORT || 5001;
 const sql = neon(process.env.DATABASE_URL);
 
+app.use(cors({
+  origin: 'http://localhost:3000', // or use "*" for public APIs
+  credentials: true, // if you're using cookies
+}));
+
 app.use(express.json());
+app.use(bodyParser.json());
 
 // Middleware to verify JWT
 function verifyToken(req, res, next) {
@@ -162,6 +170,40 @@ app.post("/api/addtocart", verifyToken, async (req, res) => {
   }
 });
 
+
+app.post("/api/cart", verifyToken, async (req, res) => {
+  const { user_id } = req.body;
+
+  if (!user_id) {
+    return res.status(400).send("User ID is required");
+  }
+
+  if (req.user.id !== user_id) {
+    return res.status(403).send("Invalid user to access");
+  }
+
+  try {
+    const cartItems = await sql`
+      SELECT 
+        c.product_id, 
+        c.quantity_cart, 
+        p.name, 
+        p.price, 
+        p.image_url
+      FROM cart c
+      JOIN products p ON c.product_id = p.product_id
+      WHERE c.user_id = ${user_id};
+    `;
+
+    res.status(200).json(cartItems);
+  } catch (err) {
+    console.error("Error fetching cart items:", err);
+    res.status(500).send("Failed to fetch cart items");
+  }
+});
+
+
+
 // Used to update product in cart
 app.put("/api/cart/update", verifyToken, async (req, res) => {
   const { user_id, product_id, quantity } = req.body;
@@ -277,6 +319,80 @@ We'll notify you when your order is shipped. Thank you for shopping with us!
 });
 
 
+app.post("/api/bulk-orders", verifyToken, async (req, res) => {
+  const { user_id, product_id, quantity, delivery_name, contact_info, address } = req.body;
+
+  if (!user_id || !product_id || !quantity || !delivery_name || !contact_info || !address) {
+    return res.status(400).send("Missing required fields");
+  }
+
+  if (req.user.id !== user_id) {
+    return res.status(403).send("User ID does not match token");
+  }
+
+  if (quantity < 10) {
+    return res.status(400).send("Minimum quantity should be 10 or more");
+  }
+
+  try {
+    const productResult = await sql`
+      SELECT name, price FROM products WHERE product_id = ${product_id};
+    `;
+
+    if (productResult.length === 0) {
+      return res.status(404).send("Product not found");
+    }
+
+    const { name: productName, price } = productResult[0];
+    const totalCost = price * quantity;
+
+    const orderResult = await sql`
+      INSERT INTO orders (user_id, delivery_name, contact_info, address)
+      VALUES (${user_id}, ${delivery_name}, ${contact_info}, ${address})
+      RETURNING id;
+    `;
+    const orderId = orderResult[0].id;
+
+    await sql`
+      INSERT INTO order_items (order_id, product_id, quantity)
+      VALUES (${orderId}, ${product_id}, ${quantity});
+    `;
+
+    const userResult = await sql`
+      SELECT email FROM users WHERE id = ${user_id};
+    `;
+    const email = userResult[0]?.email;
+
+    if (email) {
+      const emailContent = `
+Hi ${delivery_name},
+
+✅ Your bulk order has been placed successfully!
+
+🧾 Order ID: ${orderId}
+📦 Product: ${productName}
+🔢 Quantity: ${quantity}
+
+💰 Total Cost: ₹${totalCost}
+📍 Delivery Address: ${address}
+
+Thank you for shopping in bulk with us!
+
+- Team
+      `;
+
+      await sendEmail(email, "Bulk Order Confirmation", emailContent);
+    }
+
+    res.status(201).json({ message: "Bulk order placed successfully", order_id: orderId });
+  } catch (err) {
+    console.error("Bulk order error:", err);
+    res.status(500).send("Error placing bulk order");
+  }
+});
+
+
+
 // Used to get seperate order placed by user 
 app.get("/api/orders/:id", verifyToken, async (req, res) => {
   const orderId = req.params.id;
@@ -311,16 +427,28 @@ app.get("/api/orders/:id", verifyToken, async (req, res) => {
 });
 
 // Used to get User all ordered products
-app.get("/api/users/orders", verifyToken, async (req, res) => {
+app.post("/api/myorders", verifyToken, async (req, res) => {
   try {
-    const userId = req.user.id;
+    const { user_id } = req.body;
 
     const orders = await sql`
-      SELECT o.id as order_id, o.user_id, o.status, o.delivery_name, o.contact_info, o.address,
-             oi.product_id, oi.quantity
+      SELECT 
+        o.id AS order_id, 
+        o.status,
+        COUNT(oi.product_id) AS no_of_items,
+        SUM(oi.quantity * pr.price) AS price,
+        JSON_AGG(
+          JSON_BUILD_OBJECT(
+            'product_name', pr.name,
+            'image_url', pr.image_url,
+            'quantity', oi.quantity
+          )
+        ) AS products
       FROM orders o
       LEFT JOIN order_items oi ON o.id = oi.order_id
-      WHERE o.user_id = ${userId}
+      LEFT JOIN products pr ON oi.product_id = pr.product_id
+      WHERE o.user_id = ${user_id}
+      GROUP BY o.id
       ORDER BY o.id;
     `;
 
@@ -330,6 +458,10 @@ app.get("/api/users/orders", verifyToken, async (req, res) => {
     res.status(500).send("Failed to retrieve user orders");
   }
 });
+
+
+
+
 
 // Used to get Delete Single Product in User Cart
 app.delete("/api/cart/delete", verifyToken, async (req, res) => {
@@ -386,6 +518,26 @@ app.post("/api/admin/products", verifyToken, checkAdmin, async (req, res) => {
   }
 });
 
+app.get("/api/products/:id",verifyToken, async (req, res) => {
+  const productId = req.params.id;
+
+  try {
+    const product = await sql`
+      SELECT * FROM products WHERE product_id = ${productId};
+    `;
+
+    if (product.length === 0) {
+      return res.status(404).json({ error: "Product not found" });
+    }
+
+    res.json(product[0]);
+  } catch (err) {
+    console.error("Error fetching product:", err);
+    res.status(500).send("Error fetching product");
+  }
+});
+
+
 // Update product (admin only)
 app.put("/api/admin/products/:id", verifyToken, checkAdmin, async (req, res) => {
   const productId = req.params.id;
@@ -412,10 +564,21 @@ app.put("/api/admin/products/:id", verifyToken, checkAdmin, async (req, res) => 
 app.get("/api/admin/orders", verifyToken, checkAdmin, async (req, res) => {
   try {
     const orders = await sql`
-      SELECT o.id as order_id, o.user_id, o.status, o.delivery_name, o.contact_info, o.address,
-             oi.product_id, oi.quantity
+      SELECT 
+        o.id as order_id, 
+        o.user_id, 
+        o.status, 
+        o.delivery_name, 
+        o.contact_info, 
+        o.address,
+        oi.product_id, 
+        oi.quantity,
+        p.name as product_name,
+        p.image_url
       FROM orders o
       LEFT JOIN order_items oi ON o.id = oi.order_id
+      LEFT JOIN products p ON oi.product_id = p.product_id
+      WHERE oi.quantity <=6
       ORDER BY o.id;
     `;
 
@@ -426,12 +589,13 @@ app.get("/api/admin/orders", verifyToken, checkAdmin, async (req, res) => {
   }
 });
 
-// Used to Update order Status
-app.put("/api/admin/orders/:id/status", verifyToken, checkAdmin, async (req, res) => {
-  const { id } = req.params;
-  const { status } = req.body;
 
-  const allowedStatuses = ["Pending", "In Progress", "Delivered"];
+// Used to Update order Status
+app.put("/api/admin/orders/:id", verifyToken, checkAdmin, async (req, res) => {
+  const { id } = req.params;
+  const { status} = req.body;
+
+  const allowedStatuses = ["Pending", "In Progress", "Completed"];
   if (!allowedStatuses.includes(status)) {
     return res.status(400).send("Invalid status value");
   }
@@ -454,6 +618,37 @@ app.put("/api/admin/orders/:id/status", verifyToken, checkAdmin, async (req, res
     res.status(500).send("Failed to update order status");
   }
 });
+
+
+// GET Bulk Orders (quantity >= 10)
+app.get("/api/admin/bulk-orders", verifyToken, checkAdmin, async (req, res) => {
+  try {
+    const bulkOrders = await sql`
+      SELECT 
+        o.id as order_id, 
+        o.user_id, 
+        o.status, 
+        o.delivery_name, 
+        o.contact_info, 
+        o.address,
+        oi.product_id, 
+        oi.quantity,
+        p.name as product_name,
+        p.image_url
+      FROM orders o
+      LEFT JOIN order_items oi ON o.id = oi.order_id
+      LEFT JOIN products p ON oi.product_id = p.product_id
+      WHERE oi.quantity >= 10
+      ORDER BY o.id;
+    `;
+
+    res.status(200).json(bulkOrders);
+  } catch (err) {
+    console.error("Get bulk orders error:", err);
+    res.status(500).send("Failed to retrieve bulk orders");
+  }
+});
+
 
 // Used to delete Product 
 app.delete("/api/admin/products/:id", verifyToken, checkAdmin, async (req, res) => {
