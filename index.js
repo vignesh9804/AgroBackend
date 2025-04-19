@@ -5,12 +5,20 @@ import { neon } from "@neondatabase/serverless";
 import bcrypt from "bcrypt";
 import jwt from "jsonwebtoken";
 import { sendEmail } from "./emails/sendEmail.js";
+import cors from "cors";
 
 dotenv.config();
 
 const app = express();
 const PORT = process.env.PORT || 5001;
 const sql = neon(process.env.DATABASE_URL);
+
+app.use(cors({
+  origin: ['http://localhost:3000', 'https://agro-frontend-teal.vercel.app'],
+  credentials: true,
+}));
+
+
 
 app.use(express.json());
 app.use(bodyParser.json());
