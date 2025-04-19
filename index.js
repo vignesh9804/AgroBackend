@@ -659,20 +659,35 @@ app.delete("/api/admin/products/:id", verifyToken, checkAdmin, async (req, res) 
   }
 
   try {
+    
+
+    // Check for product references in order_items
+    const orderItemCheck = await sql`
+      SELECT 1 FROM order_items WHERE product_id = ${productId} LIMIT 1;
+    `;
+
+    // If product exists in cart or order_items, don't delete
+    if (orderItemCheck.length > 0) {
+      return res.status(400).json({ message: "Order exists with this product" });
+    }
+
+    // Now it's safe to delete
     const result = await sql`
-      DELETE FROM products WHERE id = ${productId};
+      DELETE FROM products WHERE product_id = ${productId};
     `;
 
     if (result.count === 0) {
-      return res.status(404).send("Product not found");
+      return res.status(404).json({ message: "Product not found" });
     }
 
     res.status(200).json({ message: "Product deleted successfully" });
   } catch (err) {
     console.error("Delete product error:", err);
-    res.status(500).send("Error deleting product");
+    res.status(500).json({ message: "Error deleting product" });
   }
 });
+
+
 
 
 app.use((req, res) => {
