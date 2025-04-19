@@ -186,7 +186,7 @@ app.post("/api/cart", verifyToken, async (req, res) => {
     const cartItems = await sql`
       SELECT 
         c.product_id, 
-        c.quantity_cart, 
+        c.quantity_cart,
         p.name, 
         p.price, 
         p.image_url
@@ -208,7 +208,7 @@ app.post("/api/cart", verifyToken, async (req, res) => {
 app.put("/api/cart/update", verifyToken, async (req, res) => {
   const { user_id, product_id, quantity } = req.body;
 
-  if (!user_id || !product_id || !quantity) {
+  if (!user_id || !product_id || quantity == null) {
     return res.status(400).send("Missing required fields");
   }
 
@@ -223,7 +223,6 @@ app.put("/api/cart/update", verifyToken, async (req, res) => {
       WHERE user_id = ${user_id} AND product_id = ${product_id};
     `;
 
-    // Check if row was actually updated
     if (result.count === 0) {
       return res.status(404).send("Cart item not found");
     }
@@ -234,6 +233,7 @@ app.put("/api/cart/update", verifyToken, async (req, res) => {
     res.status(500).send("Error updating cart item");
   }
 });
+
 
 
 // used to place order for items in the cart and send Email Notification
