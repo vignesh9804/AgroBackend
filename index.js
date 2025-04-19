@@ -14,9 +14,10 @@ const PORT = process.env.PORT || 5001;
 const sql = neon(process.env.DATABASE_URL);
 
 app.use(cors({
-  origin: 'http://localhost:3000', // or use "*" for public APIs
-  credentials: true, // if you're using cookies
+  origin: ['http://localhost:3000', 'https://agro-frontend-teal.vercel.app/login'], // replace with your actual Vercel URL
+  credentials: true,
 }));
+
 
 app.use(express.json());
 app.use(bodyParser.json());
